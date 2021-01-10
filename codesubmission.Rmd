@@ -1,0 +1,980 @@
+---
+title: "Paper WalkThrough"
+output: html_document
+---
+
+# Data Prep and Library Load Section
+
+```{r}
+##Load the Libraries - this sections loads all the appropriate libraries
+library(cowplot)
+library(biscale)
+library(ggplot2)
+library(sf)
+library(tmap)
+library(tmaptools)
+library(tidyverse)
+library(here)
+library(data.table)
+library(ggmap)
+library(spatstat)
+library(here)
+library(sp)
+library(rgeos)
+library(maptools)
+library(GISTools)
+library(tmap)
+library(sf)
+library(geojson)
+library(geojsonio)
+library(tmaptools)
+library(here)
+library(dplyr)
+library(R.utils)
+library(janitor)
+library(ggplot2)
+library(viridis)
+library(classInt)
+library(spdep)
+library(dbscan)
+library(plyr)
+library(rgdal)
+```
+
+## Load and clean the data
+
+
+```{r}
+#This is loading and cleaning the Edmonton shapefiles (both neighbourhoods and wards - we're likely to just use neighbourhoods)
+
+Edmonton_outline <- st_read(here::here("paperdata", 
+                                       "City of Edmonton _ Neighbourhood Boundaries",
+                                 "geo_export_cb31d382-436a-46b0-a4b8-cdf18156378f.shp"))
+
+Edmonton_outline <- Edmonton_outline %>%
+  clean_names()
+
+Edmonton_outline <- Edmonton_outline %>%
+  st_transform(.,3776)
+
+Edmonton_outline <- Edmonton_outline %>%
+  dplyr::relocate(name, .before = area_km2)
+
+ward_outline <- st_read(here::here("paperdata", 
+                                       "Ward Boundary",
+                                 "geo_export_583c5de6-0b8c-4e32-8e2f-d407ae0d78f1.shp"))
+
+ward_outline <- ward_outline %>%
+  st_transform(.,3776)
+
+ward_outline <- ward_outline %>%
+  dplyr::relocate(name, .before = area_km2)
+  
+```
+```{r}
+#Renaming to match other files
+ward_outline[1,1] <- "WARD 1"
+ward_outline[2,1] <- "WARD 2"
+ward_outline[3,1] <- "WARD 3"
+ward_outline[4,1] <- "WARD 4"
+ward_outline[5,1] <- "WARD 5"
+ward_outline[6,1] <- "WARD 6"
+ward_outline[7,1] <- "WARD 7"
+ward_outline[8,1] <- "WARD 8"
+ward_outline[9,1] <- "WARD 9"
+ward_outline[10,1] <- "WARD 10"
+ward_outline[11,1] <- "WARD 11"
+ward_outline[12,1] <- "WARD 12"
+```
+
+
+
+
+```{r}
+#This is loading and cleaning the Edmonton businesses
+
+businesses <- read_csv(here::here("paperdata","City_of_Edmonton_-_Business_Licenses.csv"))
+businesses <- businesses %>%
+  clean_names()
+```
+
+```{r}
+#This is loading population (by age, education and language) information
+pop_by_age <- read_csv(here::here("paperdata","2016_Census_-_Population_by_Age_Range__Neighbourhood_Ward_.csv")) %>%
+  clean_names()
+
+pop_by_education <- read_csv(here::here("paperdata","2016_Census_-_Population_by_Highest_Educational_Attainment__Neighbourhood_Ward_.csv")) %>%
+  clean_names()
+
+pop_by_language <- read_csv(here::here("paperdata","2016_Census_-_Dwelling_Unit_by_Language__Neighbourhood_Ward_.csv")) %>%
+  clean_names()
+```
+```{r}
+#Summarising demographics by age
+ward_pop_by_age <- pop_by_age %>%
+  group_by(ward) %>%
+  summarise_at(vars(-neighbourhood_number, -neighbourhood_name), sum)
+
+ward_pop_by_age <- ward_pop_by_age %>%
+replace(is.na(.),0) %>%
+  mutate(under19 = rowSums(.[2:5])) %>%
+  mutate(over19 = rowSums(.[6:19])) %>%
+  mutate(sum_age = rowSums(.[21:22])) %>%
+  mutate(ward_total_population = rowSums(.[2:20]))
+  ward_pop_by_age <- ward_pop_by_age %>%
+  mutate(total_population_all_wards = sum(ward_pop_by_age[, "ward_total_population"],na.rm=TRUE))
+  ward_pop_by_age <- ward_pop_by_age %>%
+    mutate(ward_total_population_proportion = ward_total_population / total_population_all_wards)
+
+ward_pop_by_age <- ward_pop_by_age %>%
+    mutate(under19_proportion = under19/sum_age) %>%
+    mutate(over19_proportion = over19/sum_age) %>%
+    dplyr::rename(age_no_response = no_response)
+```
+
+```{r}
+#Part 2
+ward_neighbourhood <- pop_by_age %>%
+  dplyr::select(ward, neighbourhood_name) %>%
+  dplyr::rename(neighbourhood = neighbourhood_name)
+```
+
+
+```{r}
+#Clean population data for neighbourhoods
+
+#Population by age (excluding the no response variable in sums)
+
+neighbourhood_pop_by_age <- pop_by_age %>%
+  replace(is.na(.),0) %>%
+  mutate(under19 = rowSums(.[4:7])) %>%
+  mutate(over19 = rowSums(.[8:21])) %>%
+  mutate(sum_age = rowSums(.[23:24])) %>%
+  mutate(total_population = rowSums(.[4:22]))
+neighbourhood_pop_by_age <- neighbourhood_pop_by_age %>%
+  mutate(total_population_all_neighbourhoods = sum(neighbourhood_pop_by_age[, "total_population"],na.rm=TRUE))
+neighbourhood_pop_by_age <- neighbourhood_pop_by_age %>%
+  mutate(total_population_proportion = total_population / total_population_all_neighbourhoods)
+
+neighbourhood_pop_by_age <- neighbourhood_pop_by_age %>%
+    mutate(under19_proportion = under19/sum_age) %>%
+    mutate(over19_proportion = over19/sum_age) %>%
+  mutate(age_no_response = no_response)
+```
+
+```{r}
+#Cleaning language data by ward
+ward_pop_by_language <- pop_by_language %>%
+  group_by(ward) %>%
+  summarise_at(vars(-neighbourhood_number, -neighbourhood_name), sum)
+
+ward_pop_by_language <- ward_pop_by_language %>%
+  replace(is.na(.), 0) %>%
+  mutate(non_english = rowSums(.[3:13])) %>%
+  mutate(sum_language = rowSums(.[4:13]))
+
+ward_pop_by_language <- ward_pop_by_language %>%
+  mutate(english_only_proportion = english_only / sum_language) %>%
+  mutate(non_english_proportion = non_english / sum_language)
+
+ward_pop_by_language <- ward_pop_by_language %>%
+  dplyr::rename(language_no_response = no_response)
+  
+```
+
+
+```{r}
+# Neighbourhood population by language
+
+neighbourhood_pop_by_language <- pop_by_language %>%
+  replace(is.na(.),0) %>%
+  mutate(non_english = rowSums(.[5:15])) %>%
+  mutate(sum_language = rowSums(.[4:15]))
+
+neighbourhood_pop_by_language <- neighbourhood_pop_by_language %>%
+  mutate(english_only_proportion = english_only/sum_language) %>%
+  mutate(non_english_proportion = non_english/sum_language) %>%
+  dplyr::rename(language_no_response = no_response)
+```
+
+```{r}
+#Ward population by education
+ward_pop_by_education <- pop_by_education %>%
+  group_by(ward) %>%
+  summarise_at(vars(-neighbourhood_number, -neighbourhood_name), sum)
+
+ward_pop_by_education <- ward_pop_by_education %>%
+  replace(is.na(.), 0) %>%
+  mutate(high_school_diploma_or_below = rowSums(.[2:3])) %>%
+  mutate(tertiary_education = rowSums(.[4:12])) %>%
+  mutate(university_or_above = rowSums((.[8:12]))) %>%
+  mutate(sum_education = rowSums(.[2:12])) %>%
+  mutate(high_school_diploma_or_below_proportion = high_school_diploma_or_below/sum_education) %>%
+  mutate(tertiary_education_proportion = tertiary_education/sum_education) %>%
+  mutate(university_or_above_proportion = university_or_above/sum_education) %>%
+  dplyr::rename(education_no_response = no_response)
+
+  
+```
+
+
+```{r}
+#Neighbourhood opulation by Education
+
+neighbourhood_pop_by_education <- pop_by_education %>%
+  replace(is.na(.),0) %>%
+  mutate(high_school_diploma_or_below = rowSums(.[4:5])) %>%
+  mutate(tertiary_education = rowSums(.[6:14])) %>%
+  mutate(university_or_above = rowSums(.[10:14])) %>%
+  mutate(sum_education = rowSums((.[4:14]))) %>%
+  mutate(high_school_diploma_or_below_proportion = high_school_diploma_or_below/sum_education) %>%
+  mutate(tertiary_education_proportion = tertiary_education/sum_education) %>%
+  mutate(university_or_above_proportion = university_or_above/sum_education) %>%
+  dplyr::rename(education_no_response = no_response)
+```
+
+```{r}
+#Combining ward information into one dataframe
+ward_demographic_combined <- merge(ward_pop_by_language,
+                      ward_pop_by_age,
+                      by.x="ward",
+                      by.y="ward",
+                           no.dups = TRUE) %>%
+                      distinct(.,ward,
+                      .keep_all=TRUE)
+
+ward_demographic_combined <- merge(ward_demographic_combined,
+                             ward_pop_by_education,
+                              by.x="ward",
+                      by.y="ward",
+                           no.dups = TRUE) %>%
+                      distinct(.,ward,
+                     .keep_all=TRUE)
+```
+
+
+```{r}
+#Combining neighbourhood information into one dataframeß
+neighbourhood_demographic_combined <- merge(neighbourhood_pop_by_language,
+                      neighbourhood_pop_by_age,
+                      by.x="neighbourhood_number",
+                      by.y="neighbourhood_number",
+                           no.dups = TRUE) %>%
+                      distinct(.,neighbourhood_number,
+                      .keep_all=TRUE)
+
+neighbourhood_demographic_combined <- neighbourhood_demographic_combined %>%
+  dplyr::select(-c("ward.x", "neighbourhood_name.x",))
+
+neighbourhood_demographic_combined <- merge(neighbourhood_demographic_combined,
+                              neighbourhood_pop_by_education,
+                              by.x="neighbourhood_number",
+                      by.y="neighbourhood_number",
+                           no.dups = TRUE) %>%
+                      distinct(.,neighbourhood_number,
+                      .keep_all=TRUE)
+
+neighbourhood_demographic_combined <- neighbourhood_demographic_combined %>%
+  dplyr::select(-c("ward.y", "neighbourhood_name.y"))
+
+neighbourhood_demographic_combined <- neighbourhood_demographic_combined %>%
+  dplyr::relocate(neighbourhood_name, .before = neighbourhood_number)
+
+
+```
+
+
+
+```{r}
+#Cannabis Cleaning - business data from 2 January 2021
+cannabis <- businesses %>%
+  filter(category=="Cannabis Retail Sales")
+
+cannabis_sf <- 
+  st_as_sf(cannabis, coords = c("longitude", "latitude"), crs = "WGS84") %>%
+  dplyr::relocate(trade_name, .before = category)
+
+cannabis_sf <- cannabis_sf %>%
+  st_transform(.,3776)
+```
+
+```{r}
+#Cannabis and Liquor Store Combination Cleaning
+researcharea <- businesses %>%
+  filter(category == "Cannabis Retails Sales" | category == "Alcohol Sales (Consumption Off Premises)") %>%
+  filter(!is.na(longitude))
+
+researcharea_sf <-
+  st_as_sf(researcharea, coords = c("longitude", "latitude"), crs = "WGS84")
+```
+
+
+```{r}
+#Liquor Store Cleaning
+liquorstores <- businesses %>%
+  filter(category == "Alcohol Sales (Consumption Off Premises)") %>%
+  filter(!is.na(longitude))
+
+liquorstores_sf <- 
+  st_as_sf(liquorstores, coords = c("longitude", "latitude"), crs = "WGS84")
+
+liquorstores_sf <- liquorstores_sf %>%
+  st_transform(.,3776)
+
+```
+
+```{r}
+#Adding and Cleaning Property CSV
+PropertyCSV <- read_csv(here::here("paperdata","Property_Assessment_Data__2012_-_2019_ (1).csv"))
+PropertyCSV <- PropertyCSV %>%
+  clean_names()
+```
+
+```{r}
+#More Residential cleaning - taking only 100% residential properties
+ResidentialProperty <- PropertyCSV %>%
+  dplyr::filter(assessment_class_1 == "RESIDENTIAL") %>%
+  dplyr::filter(assessment_class_percent_1 == 100)
+``` 
+
+```{r}
+#Combing residential property with ward shapefile
+ResidentialProperty <-
+  join(ResidentialProperty, ward_neighbourhood, by = "neighbourhood" )
+  
+```
+
+
+```{r}
+#Neighbourhood and Ward property value means
+NeighbourhoodResidentialPropertyMeans <- ResidentialProperty %>%
+  group_by(neighbourhood) %>%
+  dplyr::summarise(Mean = mean(assessed_value, na.rm=TRUE))
+
+WardResidentialPropertyMeans <- ResidentialProperty %>%
+  group_by(ward) %>%
+  dplyr::summarise(Mean = mean(assessed_value, na.rm=TRUE)) %>%
+  dplyr::rename(name = ward)
+```
+
+```{r}
+#Changing names to match
+Edmonton_outline <- Edmonton_outline %>%
+  mutate(uppername = toupper(name))
+```
+
+```{r}
+#Merging ward data with property means
+WardCombinedData <-
+  merge(ward_outline,
+        WardResidentialPropertyMeans,
+        by.x="name",
+        by.y="name",
+        no.dups = TRUE) %>%
+  distinct(.,area_km2,
+           .keep_all = TRUE)
+```
+
+
+```{r}
+#Merging neighbourhood data with property means
+NeighbourhoodCombinedData <- merge(Edmonton_outline,
+                      NeighbourhoodResidentialPropertyMeans,
+                      by.x="uppername",
+                      by.y="neighbourhood",
+                           no.dups = TRUE) %>%
+                      distinct(.,number,
+                      .keep_all=TRUE)
+
+NeighbourhoodCombinedData <- NeighbourhoodCombinedData %>%
+  dplyr::relocate(name, .before = uppername)
+
+
+```
+
+```{r}
+#Bringing together neighbourhood/ward information with the demographics
+neighbourhood_demographic_and_property <- merge(NeighbourhoodCombinedData,
+                                  neighbourhood_demographic_combined,
+                                  by.x="number",
+                                  by.y="neighbourhood_number",
+                                  no.dups = TRUE) %>%
+  distinct(.,number,
+           .keep_all = TRUE)
+
+neighbourhood_demographic_and_property <- neighbourhood_demographic_and_property %>%
+  dplyr::relocate(name, .before = number)
+
+ward_demographic_and_property <- merge(WardCombinedData,
+                                       ward_demographic_combined,
+                                       by.x="name",
+                                       by.y="ward",
+                                       no.dups=TRUE) %>%
+  distinct(.,name,
+           .keep_all = TRUE)
+```
+
+#Cannabis Analysis
+
+```{r}
+#Working on the cannabis data
+cannabis_sf_distinct <- distinct(cannabis_sf)
+cannabis_sf <- cannabis_sf %>%
+  st_transform(.,3776)
+
+
+
+cannabis_sub <- cannabis_sf
+```
+
+
+```{r}
+#Getting the key liquor and cannabis points for further analysis
+CannabisSubPoints2 <- cannabis_sf[Edmonton_outline,]
+LiquorSubPoints2 <- liquorstores_sf[Edmonton_outline,]
+
+```
+```{r}
+#Calculating density and area (324 removes the NA neighbourhoods that were pulling through for cannabis locations sums - this was a manual check, if doing this on another area please confirm the number required for your location)
+cannabis_points_sf_joined <- Edmonton_outline%>%
+  st_join(CannabisSubPoints2)%>%
+  add_count(trade_name)
+cannabis_points_sf_joined$n[cannabis_points_sf_joined$n == 324] = 0
+cannabis_points_sf_joined <- cannabis_points_sf_joined %>%
+  mutate(area=st_area(.)) %>%
+ mutate(density=n/area) %>%
+ dplyr::select(density, number, name, n)
+```
+
+```{r}
+#Calculating density and area (239 removes the NA neighbourhoods that were pulling through for liuor locations sums - this was a manual check, if doing this on another area please confirm the number required for your location)
+liquor_points_sf_joined <- Edmonton_outline%>%
+  st_join(LiquorSubPoints2) %>%
+  add_count(trade_name)
+liquor_points_sf_joined$n[liquor_points_sf_joined$n == 239] = 0
+liquor_points_sf_joined <- liquor_points_sf_joined %>%
+  mutate(area=st_area(.)) %>%
+ mutate(density=n/area) %>%
+ dplyr::select(density, number, name, n)
+```
+
+
+```{r}
+#Summarise relevant information for cannabis
+cannabis_points_sf_joined <- cannabis_points_sf_joined %>%                    
+  dplyr::group_by(name) %>%         
+  dplyr::summarise(density = first(density),
+          neighbourhood= first(name),
+          cannabiscount= first(n))
+```
+
+```{r}
+#Summarise relevant information for liquor stores
+liquor_points_sf_joined <- liquor_points_sf_joined %>%                    
+  dplyr::group_by(name) %>%         
+  dplyr::summarise(density = first(density),
+          neighbourhood= first(name),
+          cannabiscount= first(n))
+```
+
+
+```{r}
+#Get the centroids for each neighbourhood for cannabis locations
+cannabis_coordsW <- cannabis_points_sf_joined%>%
+  st_centroid()%>%
+  st_geometry()
+  
+plot(cannabis_coordsW,axes=TRUE)
+```
+
+```{r}
+#Get the centroids for each neighbourhood for liquor stores
+liquor_coordsW <- liquor_points_sf_joined%>%
+  st_centroid()%>%
+  st_geometry()
+  
+plot(liquor_coordsW,axes=TRUE)
+```
+
+```{r}
+#Getting queen's case neighbours for the cannabis neighbourhoods and plotting alongside the Edmonton map
+cannabis_EdmontonNB_nb <- cannabis_points_sf_joined %>%
+  poly2nb(., queen=T)
+plot(cannabis_EdmontonNB_nb, st_geometry(cannabis_coordsW), col="red")
+plot(cannabis_points_sf_joined$geometry, add=T)
+```
+
+```{r}
+#Getting queen's case neighbours for the liquor store neighbourhoods and plotting alongside the Edmonton map
+
+liquor_EdmontonNB_nb <- liquor_points_sf_joined %>%
+  poly2nb(., queen=T)
+
+plot(liquor_EdmontonNB_nb, st_geometry(liquor_coordsW), col="red")
+plot(liquor_points_sf_joined$geometry, add=T)
+```
+
+```{r}
+#Creating the spatial weights object for the cannabis locations
+cannabis_EdmontonNB.lw <- cannabis_EdmontonNB_nb %>%
+  nb2listw(., style="C")
+```
+
+```{r}
+#Creating the spatial weights object for the liquor store locations
+liquor_EdmontonNB.lw <- liquor_EdmontonNB_nb %>%
+  nb2listw(., style="C")
+```
+
+
+
+```{r}
+#Calculate the Global Moran's I for the cannabis locations
+cannabis_I_YEG_Neighbourhood_Global_Count <- cannabis_points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  moran.test(., cannabis_EdmontonNB.lw)
+
+cannabis_I_YEG_Neighbourhood_Global_Count
+```
+
+```{r}
+#Calculate the Global Moran's I for the liquor store locations
+liquor_I_YEG_Neighbourhood_Global_Count <- liquor_points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  moran.test(., liquor_EdmontonNB.lw)
+
+liquor_I_YEG_Neighbourhood_Global_Count
+```
+
+
+```{r}
+#Calculate the Geary's C for the cannabis locations
+cannabis_C_YEG_Neighbourhood_Global_Count <- 
+  cannabis_points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  geary.test(., cannabis_EdmontonNB.lw)
+
+cannabis_C_YEG_Neighbourhood_Global_Count
+```
+```{r}
+#Calculate the Geary's C for the liquor store locations
+liquor_C_YEG_Neighbourhood_Global_Count <- 
+  liquor_points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  geary.test(., liquor_EdmontonNB.lw)
+
+liquor_C_YEG_Neighbourhood_Global_Count
+```
+
+
+```{r}
+#Calculate the Getis Ord G stat for the cannabis locations
+
+cannabis_G_YEG_Neighbourhood_Global_Count <- 
+  cannabis_points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  globalG.test(., cannabis_EdmontonNB.lw)
+
+cannabis_G_YEG_Neighbourhood_Global_Count
+```
+```{r}
+#Calculate the Getis Ord G stat for the liquor store locations
+
+liquor_G_YEG_Neighbourhood_Global_Count <- 
+  liquor_points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  globalG.test(., liquor_EdmontonNB.lw)
+
+liquor_G_YEG_Neighbourhood_Global_Count
+```
+
+
+```{r}
+#Prepare the Local Moran I's stat for the cannabis locations
+cannabis_I_EdmontonNeighbourhood_Local_count <- cannabis_points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  localmoran(., cannabis_EdmontonNB.lw)%>%
+  as_tibble()
+```
+
+```{r}
+#Prepare the Local Moran I's stat for the liquor store locations
+liquor_I_EdmontonNeighbourhood_Local_count <- liquor_points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  localmoran(., liquor_EdmontonNB.lw)%>%
+  as_tibble()
+```
+
+
+```{r}
+#Create a table with all of the relevant information (I score, Z-score of local cannabis counts for density and counts)
+cannabis_points_sf_joined <- cannabis_points_sf_joined %>%
+  mutate(cannabis_count_I = as.numeric(cannabis_I_EdmontonNeighbourhood_Local_count$Ii))%>%
+  mutate(cannabis_count_Iz =as.numeric(cannabis_I_EdmontonNeighbourhood_Local_count$Z.Ii))%>%
+  mutate(cannabis_density_I =as.numeric(cannabis_I_EdmontonNeighbourhood_Local_count$Ii))%>%
+  mutate(cannabis_density_Iz =as.numeric(cannabis_I_EdmontonNeighbourhood_Local_count$Z.Ii))
+```
+
+```{r}
+#Create a table with all of the relevant information (I score, Zscore of local liquor store counts for density and counts)
+liquor_points_sf_joined <- liquor_points_sf_joined %>%
+  mutate(liquor_count_I = as.numeric(liquor_I_EdmontonNeighbourhood_Local_count$Ii))%>%
+  mutate(liquor_count_Iz =as.numeric(liquor_I_EdmontonNeighbourhood_Local_count$Z.Ii))%>%
+  mutate(liquor_density_I =as.numeric(liquor_I_EdmontonNeighbourhood_Local_count$Ii))%>%
+  mutate(liquor_density_Iz =as.numeric(liquor_I_EdmontonNeighbourhood_Local_count$Z.Ii))
+```
+
+
+```{r}
+#Manually set breaks for standard deviations 2.58 from the mean meaning they're significant at the 99% level
+cannabis_breaks1<-c(-1000,-2.58,-1.96,-1.65,1.65,1.96,2.58,1000)
+liquor_breaks1<-c(-1000,-2.58,-1.96,-1.65,1.65,1.96,2.58,1000)
+```
+
+```{r}
+#Set colour of your choice
+cannabis_MoranColours<- viridis(8)
+liquor_MoranColours<- viridis(8)
+```
+
+
+```{r}
+#Plot local Moran's I for cannabis locations
+tmap_mode("plot")
+tm_shape(cannabis_points_sf_joined) +
+    tm_polygons("cannabis_count_Iz",
+        style="jenks",
+        breaks=cannabis_breaks1,
+        palette=cannabis_MoranColours,
+        midpoint=NA,
+        title="Local Moran's I Z-Score") +
+  tm_shape(cannabis_sf) +
+  tm_dots(col = "category",
+          labels = "Cannabis Shop",
+          title = "") +
+  tm_scale_bar(position = c("left", "bottom")) +
+  tm_compass(position = c("right", "bottom")) +
+  tm_layout(inner.margins = c(0.15, 0.10, 0.10, 0.1), asp = 1,
+            title = "Local Moran's I, Cannabis Shops in Edmonton",
+            fontfamily = 'Helvetica')
+```
+
+
+
+```{r}
+#Calculate Gi* statistic for cannabis locations
+cannabis_Gi_EdmontonNeighbourhood_Local_Count <- cannabis_points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  localG(., cannabis_EdmontonNB.lw)
+
+cannabis_points_sf_joined <- cannabis_points_sf_joined %>%
+  mutate(cannabis_count_G = as.numeric(cannabis_Gi_EdmontonNeighbourhood_Local_Count))
+```
+
+```{r}
+#Calculate Gi* statistic for liquor store locations
+liquor_Gi_EdmontonNeighbourhood_Local_Count <- liquor_points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  localG(., liquor_EdmontonNB.lw)
+
+liquor_points_sf_joined <- liquor_points_sf_joined %>%
+  mutate(liquor_count_G = as.numeric(liquor_Gi_EdmontonNeighbourhood_Local_Count))
+```
+
+
+```{r}
+#Plot Gi* to find cannabis hot spots
+cannabis_GIColours<- viridis(8)
+
+tm_shape(cannabis_points_sf_joined) +
+    tm_polygons("cannabis_count_G",
+        style="jenks",
+        breaks=cannabis_breaks1,
+        palette=cannabis_GIColours,
+        midpoint=NA,
+        title="Gi* Z-Score") +
+  tm_shape(cannabis_sf) +
+  tm_dots(col = "category",
+          labels = "Cannabis Shop",
+          title = "") +
+  tm_scale_bar(position = c("left", "bottom")) +
+  tm_compass(position = c("right", "bottom")) +
+  tm_layout(inner.margins = c(0.15, 0.10, 0.10, 0.1), asp = 1,
+            title = "Getis-Ord Gi*, Cannabis Shops in Edmonton",
+            fontfamily = 'Helvetica')
+```
+
+```{r}
+#Plot Gi* to find liquor hot spots
+
+liquor_GIColours<- viridis(8)
+
+tm_shape(liquor_points_sf_joined) +
+    tm_polygons("liquor_count_G",
+        style="jenks",
+        breaks=liquor_breaks1,
+        palette=liquor_GIColours,
+        midpoint=NA,
+        title="Gi* Z-Score") +
+  tm_shape(cannabis_sf) +
+  tm_dots(col = "category",
+          labels = "Liquor Store",
+          title = "") +
+  tm_scale_bar(position = c("left", "bottom")) +
+  tm_compass(position = c("right", "bottom")) +
+  tm_layout(inner.margins = c(0.15, 0.10, 0.10, 0.1), asp = 1,
+            title = "Getis-Ord Gi*, Liquor Stores in Edmonton",
+            fontfamily = 'Helvetica')
+```
+
+
+
+```{r}
+#Create a combined dataframe
+joined <-
+  st_join(cannabis_points_sf_joined, neighbourhood_demographic_and_property, join = st_equals, left = T )
+
+joined <-
+  st_join(joined, liquor_points_sf_joined, join = st_equals, left = T)
+
+joined <- joined %>%
+  dplyr::rename(neighbourhood = neighbourhood.x)
+
+joineddata <- joined %>%
+  st_drop_geometry() %>%
+  summarise_all(class) %>%
+  pivot_longer(everything(),
+               names_to="All_variables",
+               values_to="Variable_class")
+```
+
+
+
+```{r}
+#Plot average property price with cannabis locations
+current.mode <- tmap_mode("plot")
+
+tm_shape(joined) +
+  tm_fill("Mean", style= "jenks", palette = "viridis", textNA = "Missing Data / Non-Residential", title = "Average House Price per Neighbourhood - $CAD") +
+  tm_borders() +
+  tm_shape(cannabis_sf) + 
+    tm_dots(col = "category",
+          labels = "Cannabis Shop",
+          title = "") +
+  tm_scale_bar(position = c("left", "bottom")) +
+  tm_compass(position = c("right", "bottom")) +
+  tm_layout(inner.margins = c(0.1, 0.15, 0.17, 0.05), asp = 1,
+            title = "Average Property Price per Neighbourhood",
+            fontfamily = 'Helvetica')
+```
+
+```{r}
+#Plot education levels with cannabis locations
+
+current.mode <- tmap_mode("plot")
+
+tm_shape(joined) +
+  tm_fill("tertiary_education_proportion", style= "jenks", palette = "viridis", textNA = "Missing Data / Non-Residential", title = "Tertiary Education or Higher (%)") +
+  tm_borders() +
+  tm_shape(cannabis_sf) + 
+    tm_dots(col = "category",
+          labels = "Cannabis Shop",
+          title = "") +
+  tm_scale_bar(position = c("left", "bottom")) +
+  tm_compass(position = c("right", "bottom")) +
+  tm_layout(inner.margins = c(0.1, 0.15, 0.17, 0.05), asp = 1,
+            title = "Percentage of People with Tertiary Education or Higher",
+            fontfamily = 'Helvetica')
+  
+```
+```{r}
+#Plot non-English households with cannabis locations
+
+current.mode <- tmap_mode("plot")
+
+tm_shape(joined) +
+  tm_fill("non_english_proportion", style= "jenks", palette = "viridis", textNA = "Missing Data / Non-Residential", title = "Households that can use a Language Other than English (%)") +
+  tm_borders() +
+  tm_shape(cannabis_sf) + 
+  tm_dots(col = "category",
+          labels = "Cannabis Shop",
+          title = "") +
+  tm_scale_bar(position = c("left", "bottom")) +
+  tm_compass(position = c("right", "bottom")) +
+  tm_layout(inner.margins = c(0.1, 0.15, 0.17, 0.05), asp = 1,
+            title = "Households Where English is not the Only Language",
+            fontfamily = 'Helvetica')
+```
+```{r}
+#Plot neighbourhood population with cannabis locations
+
+current.mode <- tmap_mode("plot")
+
+tm_shape(joined) +
+  tm_fill("total_population", style= "jenks", palette = "viridis", textNA = "Missing Data / Non-Residential", title = "Neighbourhood Population") +
+  tm_borders() +
+        tm_shape(cannabis_sf) + 
+  tm_dots(col = "category",
+          labels = "Cannabis Shop",
+          title = "") +
+  tm_scale_bar(position = c("left", "bottom")) +
+  tm_compass(position = c("right", "bottom")) +
+  tm_layout(inner.margins = c(0.1, 0.15, 0.17, 0.05), asp = 1,
+            title = "Total Population of Neighbourhoods",
+            fontfamily = 'Helvetica')
+```
+
+```{r}
+#Drop na values for bivariate plots and begin to plot Gi* and average property price in bivariate plot
+datajoined <- joined %>% drop_na()
+
+datajoined <-
+  bi_class(datajoined, x = cannabis_count_G, y = Mean, style = "quantile", dim = 3)
+```
+```{r}
+#Create the map for the bivariate plot
+map <- ggplot(data = datajoined, aes(geometry = geometry)) +
+  geom_sf(data = Edmonton_outline, color = "grey", size = 0.1, show.legend = FALSE) +
+  geom_sf(data = datajoined, mapping = aes(fill = bi_class), color = "white", size = 0.1, show.legend = FALSE) +
+  bi_scale_fill(pal = "DkViolet", dim = 3, na.value = "grey") +
+  bi_theme()
+```
+
+```{r}
+#Create the legend for the bivariate plot
+legend <- bi_legend(pal = "DkViolet",
+                    dim = 3,
+                    xlab = "            Higher Cannabis Gi* Value ",
+                    ylab = "            Higher Property Value ",
+                    size = 5)
+```
+
+```{r}
+#Plot the bivariate plot for Cannabis Gi* and Average property price
+ggdraw() +
+  draw_plot(map, 0, 0, 1, 1) +
+  draw_plot(legend, 0.1, .65, 0.2, 0.2) +
+  draw_text("   Gi* Cannabis and 
+  Property Value Bivariate Plot", y = 0.9, x=0.4, size = 8) +
+  draw_text("Please note grey areas 
+    are missing relevant data", x = 0.2, y=0.625, size = 4)
+```
+```{r}
+#Repeat the above process for Gi* for cannabis and Non-English household proportion
+datajoined1 <-
+  bi_class(datajoined, x = cannabis_count_G, y = non_english_proportion, style = "quantile", dim = 3)
+
+map1 <- ggplot(data = datajoined1, aes(geometry = geometry)) +
+  geom_sf(data = Edmonton_outline, color = "grey", size = 0.1, show.legend = FALSE) +
+  geom_sf(data = datajoined1, mapping = aes(fill = bi_class), color = "white", size = 0.1, show.legend = FALSE) +
+  bi_scale_fill(pal = "DkViolet", dim = 3, na.value = "grey") +
+  bi_theme()
+
+legend1 <- bi_legend(pal = "DkViolet",
+                    dim = 3,
+                    xlab = "Higher Gi* Value ",
+                    ylab = "Higher Non English Only % ",
+                    size = 5)
+
+ggdraw() +
+  draw_plot(map1, 0, 0, 1, 1) +
+  draw_plot(legend1, 0.1, .65, 0.2, 0.2) +
+  draw_text("   Non-English Only Household Proportion (%) 
+  and Property Value Bivariate Plot", y = 0.9, x=0.4, size = 8) +
+  draw_text("Please note grey areas 
+        are missing relevant vdata", x = 0.2, y=0.625, size = 4)
+```
+
+```{r}
+#Repeat the above process for Gi* for cannabis and Gi* for liquor stores
+datajoined2 <-
+  bi_class(datajoined, x = cannabis_count_G, y = liquor_count_G, style = "quantile", dim = 3)
+
+map2 <- ggplot(data = datajoined2, aes(geometry = geometry)) +
+  geom_sf(data = Edmonton_outline, color = "grey", size = 0.1, show.legend = FALSE) +
+  geom_sf(data = datajoined2, mapping = aes(fill = bi_class), color = "white", size = 0.1, show.legend = FALSE) +
+  bi_scale_fill(pal = "DkViolet", dim = 3, na.value = "grey") +
+  bi_theme()
+
+legend2 <- bi_legend(pal = "DkViolet",
+                    dim = 3,
+                    xlab = "Higher Cannabis Gi* Value",
+                    ylab = "Higher Liquor Gi* Value",
+                    size = 4)
+
+ggdraw() +
+  draw_plot(map2, 0, 0, 1, 1) +
+  draw_plot(legend2, 0.2, .65, 0.2, 0.2) +
+  draw_text("   Cannabis Gi* and 
+          Liquor Store Gi* Bivariate Plot", y = 0.9, x=0.4, size = 8) +
+ draw_text("Please note grey areas 
+    are missing relevant data", x = 0.275, y=0.625, size = 4)
+```
+
+```{r}
+#Repeat the above process for Gi* for cannabis and neighbourhood total population
+datajoined3 <-
+  bi_class(datajoined, x = cannabis_count_G, y = total_population, style = "quantile", dim = 3)
+
+map3 <- ggplot(data = datajoined3, aes(geometry = geometry)) +
+  geom_sf(data = Edmonton_outline, color = "grey", size = 0.1, show.legend = FALSE) +
+  geom_sf(data = datajoined2, mapping = aes(fill = bi_class), color = "white", size = 0.1, show.legend = FALSE) +
+  bi_scale_fill(pal = "DkViolet", dim = 3, na.value = "grey") +
+  bi_theme()
+
+legend3 <- bi_legend(pal = "DkViolet",
+                    dim = 3,
+                    xlab = "Higher Neighbourhood Cannabis Gi* Value",
+                    ylab = "Higher Neighbourhood Population",
+                    size = 3)
+
+ggdraw() +
+  draw_plot(map3, 0, 0, 1, 1) +
+  draw_plot(legend3, 0.1, .65, 0.2, 0.2) +
+  draw_text("        Cannabis Gi* and 
+          Neighbourhood Population 
+          Bivariate Plot", y = 0.9, x=0.4, size = 8) +
+  draw_text("Please note grey areas 
+        are missing relevant data", x = 0.2, y=0.625, size = 4)
+```
+
+```{r}
+#Repeat the above process for Gi* for cannabis and neighbourhood population proportion under 19
+datajoined4 <-
+  bi_class(datajoined, x = cannabis_count_G, y = under19, style = "quantile", dim = 3)
+
+map4 <- ggplot(data = datajoined4, aes(geometry = geometry)) +
+  geom_sf(data = Edmonton_outline, color = "grey", size = 0.1, show.legend = FALSE) +
+  geom_sf(data = datajoined4, mapping = aes(fill = bi_class), color = "white", size = 0.1, show.legend = FALSE) +
+  bi_scale_fill(pal = "DkViolet", dim = 3, na.value = "grey") +
+  bi_theme()
+
+legend4 <- bi_legend(pal = "DkViolet",
+                    dim = 3,
+                    xlab = "Higher Cannabis Gi* Value",
+                    ylab = "Higher Proportion under 19",
+                    size = 3)
+
+ggdraw() +
+  draw_plot(map4, 0, 0, 1, 1) +
+  draw_plot(legend4, 0.2, .65, 0.2, 0.2) +
+  draw_text("        Cannabis Gi* and 
+          Under 19 Neighbourhood Bivariate Plot", y = 0.9, x=0.4, size = 8) +
+  draw_text("Please note grey areas 
+    are missing relevant data", x = 0.275, y=0.625, size = 4)
+```
+
+```{r}
+#You're done!
+```
+
